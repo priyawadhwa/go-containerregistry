@@ -15,13 +15,18 @@
 package crane
 
 import (
+	"io"
 	"log"
 	"net/http"
+	"os"
+	"path"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/google/go-containerregistry/authn"
 	"github.com/google/go-containerregistry/name"
+	"github.com/google/go-containerregistry/v1"
 	"github.com/google/go-containerregistry/v1/remote"
 	"github.com/google/go-containerregistry/v1/tarball"
 )
@@ -33,6 +38,32 @@ func NewCmdPull() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		Run:   pull,
 	}
+}
+
+type ondiskCache struct {
+	tmpdir string
+}
+
+func (c ondiskCache) Load(h v1.Hash) (io.ReadCloser, error) {
+	f, err := os.Open(path.Join(c.tmpdir, strings.Replace(h.String(), ":", "_", -1)))
+	if os.IsNotExist(err) {
+		return nil, remote.ErrCacheMiss
+	} else if err != nil {
+		return nil, err
+	}
+	log.Println("reading from cache", h)
+	return f, nil
+}
+
+func (c ondiskCache) Store(h v1.Hash, rc io.ReadCloser) error {
+	f, err := os.Create(path.Join(c.tmpdir, strings.Replace(h.String(), ":", "_", -1)))
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	_, err = io.Copy(f, rc)
+	log.Println("wrote to cache", h)
+	return err
 }
 
 func pull(_ *cobra.Command, args []string) {
@@ -49,7 +80,9 @@ func pull(_ *cobra.Command, args []string) {
 		log.Fatalf("getting creds for %q: %v", t, err)
 	}
 
-	i, err := remote.Image(t, auth, http.DefaultTransport)
+	i, err := remote.Image(t, auth, http.DefaultTransport, &remote.ImageOptions{
+		Cache: ondiskCache{os.Getenv("GO_CR_CACHE")},
+	})
 	if err != nil {
 		log.Fatalf("reading image %q: %v", t, err)
 	}
